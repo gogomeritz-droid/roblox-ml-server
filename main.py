@@ -1,11 +1,10 @@
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException, Query
 from pydantic import BaseModel
 import pandas as pd
 import numpy as np
 import time
 import threading
 from sklearn.ensemble import RandomForestClassifier
-from sklearn.preprocessing import LabelEncoder
 
 app = FastAPI()
 
@@ -51,6 +50,12 @@ def update_raid(data: RaidData):
     [데이터 수집 엔드포인트]
     로블록스에서 레이드 종료 시 전송된 데이터를 누적 저장합니다.
     """
+    # 유효성 검사 (선택 사항이지만 안전성을 위해 추가)
+    if data.monster not in VALID_MONSTERS:
+        raise HTTPException(status_code=400, detail="유효하지 않은 몬스터 이름입니다.")
+    if data.weapon not in VALID_WEAPONS:
+        raise HTTPException(status_code=400, detail="유효하지 않은 무기 이름입니다.")
+
     current_time = data.timestamp if data.timestamp else time.time()
     
     raid_history.append({
@@ -94,12 +99,11 @@ def run_random_forest_ml_analysis():
                     X = df[["relative_time"]]
                     y = df["weapon"]
                     
-                    # RandomForest 모델 초기화 및 학습
+                    # RandomForest 모델 초기화 및 학습 (랜덤포레스트 적용)
                     model = RandomForestClassifier(n_estimators=50, random_state=42)
                     model.fit(X, y)
                     
                     # 현재 시점을 기준으로 9개 무기에 대한 선택 확률 예측
-                    # 가상의 최신 테스트 포인트 생성
                     latest_time = df["relative_time"].max()
                     X_test = pd.DataFrame({"relative_time": [latest_time]})
                     
@@ -107,7 +111,7 @@ def run_random_forest_ml_analysis():
                         probs = model.predict_proba(X_test)[0]
                         classes = model.classes_
                         
-                        # 모델이 예측한 확률을 100분율로 매핑
+                        # 모델이 예측한 확률을 백분율로 매핑
                         prob_map = {cls: prob * 100 for cls, prob in zip(classes, probs)}
                         for w in VALID_WEAPONS:
                             stats_dict[w] = float(prob_map.get(w, 0.0))
@@ -136,7 +140,7 @@ def run_random_forest_ml_analysis():
         except Exception as e:
             print(f"Random Forest ML Error: {e}")
             
-        # 24시간(86400초) 대기 후 재학습
+        # 24시간(86400초) 대기 후 재학습 (테스트 시에는 시간을 줄여서 확인 가능)
         time.sleep(86400)
 
 @app.on_event("startup")
@@ -145,15 +149,25 @@ def startup_event():
     thread = threading.Thread(target=run_random_forest_ml_analysis, daemon=True)
     thread.start()
 
-@app.get("/get_monster_stats/{monster_name}")
-def get_monster_stats(monster_name: str):
+@app.get("/get_raid_stats")
+def get_raid_stats(monster: str = Query(..., description="조회할 몬스터 이름")):
     """
-    [클라이언트 호출 엔드포인트]
-    로블록스에서 몬스터 버튼을 누를 때, 머신러닝이 학습해 둔 최신 결과를 즉시 전달합니다.
+    [로블록스 연동용 GET 엔드포인트]
+    로블록스에서 `/get_raid_stats?monster=보스이름` 형식으로 요청하면 
+    머신러닝이 분석한 9개 무기 통계 백분율 결과를 즉시 반환합니다.
     """
-    if monster_name in cached_ml_results:
-        return {"monster": monster_name, "weapons": cached_ml_results[monster_name]}
+    if monster not in VALID_MONSTERS:
+        raise HTTPException(status_code=400, detail="존재하지 않는 몬스터입니다.")
+
+    if monster in cached_ml_results:
+        return {
+            "monster": monster,
+            "weapons": cached_ml_results[monster]
+        }
     
     # 데이터가 아직 없는 초기 상태인 경우 0%로 9개 무기 반환
     default_ranking = [{"weapon": w, "percentage": 0.0} for w in VALID_WEAPONS]
-    return {"monster": monster_name, "weapons": default_ranking}
+    return {
+        "monster": monster,
+        "weapons": default_ranking
+    }
